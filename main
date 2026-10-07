@@ -1,0 +1,109 @@
+def robo_main_cycle(self):
+        global Tray1
+        Tray1 = 1
+        global Cell1
+        global photodata
+        global photodata1
+        print(f"[MAIN] ЦИКЛ MAIN для {self.number} стола старт")
+        logging.info(f"[MAIN] ЦИКЛ MAIN для {self.number} стола старт")
+
+        current_loge = 2  # Начинаем с ложемента 2
+        photodata1 = '111'
+        next_photodata = photodata1
+        while True:
+            try:
+                print(f"\n=== Обработка ложемента {current_loge} ===")
+            
+                # 1. Сдвигаем стол под прошивальщик
+                self._send_table_command(101 if current_loge == 1 else 102)
+                logging.info(f"[MAIN] Сдвигаем стол {self.number} под прошивальщик")
+                
+                # 2. Опускаем прошивальщик
+                self._send_table_command(103)
+                logging.info(f"[MAIN] Опускаем прошивальщик стол {self.number}")
+                
+                # 3. Запускаем прошивку (используем фото, сделанное заранее)
+                # self.start_sewing(next_photodata, loge=current_loge)
+                logging.info(f"[MAIN] Запускаем прошивку стол {self.number}")
+                # Прошивка будет работать в фоне, пока мы готовим следующую плату
+                sewing_thread = threading.Thread(
+                    target=self.start_sewing, 
+                    args=(next_photodata, current_loge)
+                )
+                sewing_thread.start()
+
+
+                # 4. Пока шьется на текущем ложементе, готовим следующий
+                
+                # 4.1 Определяем свободный ложемент
+                free_loge = 2 if current_loge == 1 else 1
+                
+                while not self.rob_manager.acquire(self.number):
+                    logging.info(f"[MAIN] СТОЛ {self.number} ждет освобождения робота")
+                    time.sleep(1)  # Подождать 1 секунду
+                try:
+                    # 4.2 Забираем новую плату из тары
+                    Cell1 = Cell1 + 1
+                    if not self._send_robot_command(210):
+                        raise TableOperationFailed("Ошибка забора платы из тары")
+                    logging.info(f"[MAIN] СТОЛ {self.number} Забираем новую плату из тары ячейка {Cell1}")
+                    
+                    # 4.3 Фотографируем новую плату
+                    _, new_photodata = self._take_photo()
+                    logging.info(f"[MAIN] СТОЛ {self.number} Фотографируем новую плату {new_photodata}")
+                    
+                    # 4.4 Укладываем новую плату на свободный ложемент
+                    if not self._send_robot_command(220, cell_num=free_loge):
+                        raise TableOperationFailed(f"Ошибка укладки в ложемент {free_loge}")
+                    logging.info(f"[MAIN] СТОЛ {self.number} Укладываем новую плату на свободный ложемент {free_loge}")
+
+                finally:
+                    print(f"[MAIN] Стол {self.number} Робот освобожден столом")
+                    logging.info(f"[MAIN] Стол {self.number} Робот освобожден столом")
+                    self.rob_manager.release(self.number)
+
+                # 5. ЖДЕМ ЗАВЕРШЕНИЯ ПРОШИВКИ
+                sewing_thread.join()  # Ждем окончания прошивки
+                logging.info(f"[MAIN] СТОЛ {self.number} Прошивка на ложе {free_loge} завершена")
+
+                # 6. Поднимаем прошивальщик
+                self._send_table_command(104)
+                logging.info(f"[MAIN] СТОЛ {self.number} Подняли прошивальщик с ложе {free_loge}")
+                
+                # 7. Сдвигаем стол для доступа к обработанной плате
+                self._send_table_command(102 if current_loge == 1 else 101)
+                logging.info(f"[MAIN] СТОЛ {self.number} сдвинут по оси X")
+                
+                
+                # 8. Забираем обработанную плату и кладем в тару
+                while not self.rob_manager.acquire(self.number):
+                    logging.info(f"[MAIN] СТОЛ {self.number} ждет освобождения робота")
+                    time.sleep(1)
+
+                try:
+                    # 8.1 Забираем обработанную плату
+                    if not self._send_robot_command(230, cell_num=current_loge):
+                        raise TableOperationFailed(f"Ошибка забора с ложемента {current_loge}")
+                    logging.info(f"[MAIN] СТОЛ {self.number} Забираем обработанную плату с ложемента {current_loge}")
+                    
+                    # 8.2 Укладываем в тару
+                    if not self._send_robot_command(241):
+                        raise TableOperationFailed("Ошибка укладки в тару")
+                    logging.info(f"[MAIN] СТОЛ {self.number} Укладываем в тару плату")
+                    
+                finally:
+                    print(f"[MAIN] Стол {self.number} Робот освобожден столом")
+                    logging.info(f"[MAIN] Стол {self.number} Робот освобожден столом")
+                    self.rob_manager.release(self.number)
+                
+                # 9. Подготавливаем данные для следующей итерации
+                current_loge = free_loge  # Переключаемся на следующий ложемент
+                next_photodata = new_photodata  # Используем фото новой платы
+                logging.info(f"[MAIN] Стол {self.number} Подготавливаем данные для следующей итерации ложе {current_loge} датаматрикс {next_photodata}")
+                
+                print(f"[MAIN] Следующая итерация: ложемент {current_loge}")
+                
+            except Exception as e:
+                logging.error(f"Ошибка в цикле обработки: {str(e)}")
+                # Здесь может быть логика восстановления
+                time.sleep(5)
