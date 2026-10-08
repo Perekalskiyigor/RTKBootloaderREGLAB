@@ -5,6 +5,11 @@ import configparser
 import datetime
 from requests.auth import HTTPBasicAuth
 import logging
+import os
+import shutil
+from pathlib import Path
+
+
 logger1c = logging.getLogger("API1CLog")
 logger1c.setLevel(logging.INFO)
 
@@ -29,6 +34,8 @@ logger1c.propagate = False
 config = configparser.ConfigParser()
 config.read('config.ini')
 
+WHISKEY_LOG_DIR = r"\\Whiskey\erp$\1C_RTK_CMPP_Logs"
+
 url_send_data = config['server']['url']
 username = config['server']['username']
 password = config['server']['password']
@@ -50,6 +57,55 @@ url_send_data = config['server']['url']
 username = config['server']['username']
 password = config['server']['password']
 url_token = config['server']['url_token']
+
+
+WHISKEY_LOG_DIR = r"\\Whiskey\erp$\1C_RTK_CMPP_Logs"
+
+
+def copy_log_to_whiskey(full_log_path):
+    """
+    Копирует лог на Whiskey с сохранением папки заказа.
+
+    Возвращает сетевой путь при успехе,
+    пустую строку при ошибке.
+    """
+    if not full_log_path:
+        return ""
+
+    try:
+        source = Path(full_log_path)
+
+        if not source.is_file():
+            logger1c.error(
+                "COPY LOG | File not found: %s", source
+            )
+            return ""
+
+        # Имя папки заказа
+        order_folder = source.parent.name
+
+        # Папка заказа на Whiskey
+        destination_dir = Path(WHISKEY_LOG_DIR) / order_folder
+        destination_dir.mkdir(parents=True, exist_ok=True)
+
+        # Полный путь назначения
+        destination = destination_dir / source.name
+
+        shutil.copy2(source, destination)
+
+        logger1c.info(
+            "COPY LOG SUCCESS | %s -> %s",
+            source, destination
+        )
+
+        return str(destination)
+
+    except (OSError, shutil.Error) as e:
+        logger1c.error(
+            "COPY LOG FAILED | path=%s | error=%s",
+            full_log_path, e
+        )
+        return ""
 
 
 def get_token():
@@ -240,6 +296,9 @@ def send_unsuccess_log(board_dict):
     dm_code_time = ts.get("dm_code_time", now)
     firmware_finished_time = ts.get("firmware_finished_time", now)
     board_output_time = ts.get("board_output_time", now)
+    network_log_path = copy_log_to_whiskey(
+    bad_item.get("full_log_path", "")
+    )
 
     payload = {
         "rtk_id": "RTK_R050_BoardsIO_1",
@@ -255,7 +314,7 @@ def send_unsuccess_log(board_dict):
                 "operator": bad_item["operator"],
                 "error": bad_item["error"],
                 "timestamps":ts,
-                "full_log_path": bad_item.get("full_log_path", ""),
+                "full_log_path": network_log_path,
                 "dm_code_time": dm_code_time,
                 "firmware_finished_time": firmware_finished_time,
                 "board_output_time": board_output_time
@@ -365,9 +424,9 @@ board_dict_fail = {
             "full_log_path": r"C:\nails_table_v4\hub\nails_table_hub\resources\outputs\reports\nt_cmpp_rtk_2\ЗНП_29961_1_1\log_R050_DO_16_012_000_ABA_U00082801B_N1_1.txt",
 
             "timestamps": {
-                "dm_code_time": "2026-09-24 05:14:24",
-                "firmware_finished_time": "2026-09-24 05:15:46",
-                "board_output_time": "2026-09-24 05:15:46"
+                "dm_code_time": "2026-09-24 05:14:25",
+                "firmware_finished_time": "2026-09-24 05:15:47",
+                "board_output_time": "2026-09-24 05:15:47"
             }
         }
     ]
@@ -380,3 +439,29 @@ board_dict_fail = {
 #response = send_unsuccess_log(board_dict_fail)
 #response = send_success_log(board_dict_success)
 #print("Ответ сервера:", response)
+
+
+
+
+# if __name__ == "__main__":
+
+#     source_path = board_dict_fail["bad"][0]["full_log_path"]
+
+#     print("Исходный файл:", source_path)
+
+#     result = copy_log_to_whiskey(source_path)
+
+#     if result:
+#         print("КОПИРОВАНИЕ УСПЕШНО")
+#         print("Сетевой путь:", result)
+#         print("Файл существует:", Path(result).is_file())
+#     else:
+#         print("ОШИБКА КОПИРОВАНИЯ")
+#         print("Смотри API1C.log")
+
+
+
+# response = send_unsuccess_log(board_dict_fail)
+
+# print("\nОТВЕТ 1С:")
+# print(response)
