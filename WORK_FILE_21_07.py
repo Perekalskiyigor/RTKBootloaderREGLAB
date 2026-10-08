@@ -12,7 +12,7 @@ import sys
 import os
 import SQLite
 import Mertech_scanner
-import BoardAprove
+#import BoardAprove
 #import TrayVision
 
 
