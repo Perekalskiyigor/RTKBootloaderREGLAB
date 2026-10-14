@@ -20,6 +20,7 @@ import Mertech_scanner
 # --- Глобальная аварийная остановка всего комплекса ---
 EMERGENCY_STOP = threading.Event()
 NO_MORE_NEW_BOARDS = threading.Event()  # больше не брать из тары
+NEW_TRAY_REQUEST = threading.Event() # событие запроса новой тары
 STOP_ORDER = threading.Event()          # всё выгружено, можно остановиться
 SETUP_TABLE = 0
 SUB_SETUP_TABLE = 0
@@ -241,6 +242,7 @@ shared_data = {
         'OPC_success_count':0, #кол во успешно прощитых платё
         'OPC_nonsuccess_count':0, # кол-во неуспешно прошщитых плат
         'OPC_name': "",  # имя пользователя, заносимое в 1с
+        'OPC_do_next_tara': False,  # Установлена новая тара с платами
 
         'VISION__status': 'idle',   # машинное зрение тары
         'VISION_ERROR': '',
@@ -526,6 +528,9 @@ class OPCClient:
 
         logger4.info(f"[OPC] инициализация  OPC Communication class | url={self.url}")
 
+        # Обнуляем счётчик новой тары
+        self.prev_next_tara = False
+
         # Start threads
         self.server_thread = threading.Thread(target=self.connection_manager, daemon=True)
         self.update_thread = threading.Thread(target=self.update_registers, daemon=True)
@@ -653,6 +658,8 @@ class OPCClient:
                         'ns=2;s=Application.UserInterface.OPC_vision_empty',
                         'ns=2;s=Application.UserInterface.OPC_vision_order',
                         'ns=2;s=Application.UserInterface.OPC_vision_status',
+                        # Обнуление новых для ртк реглаба
+                        'ns=2;s=Application.UserInterface.OPC_do_next_tara',
                     ]
                     ok_count = 0
                     for nid in warm_ids:
@@ -689,7 +696,7 @@ class OPCClient:
     # -------------------- основной цикл OPC витрины --------------------
     def update_registers(self):
         """Раз в секунду читает кнопки, пишет статусы из shared_data в OPC"""
-        global shared_data, Cell3, Order
+        global shared_data, Cell1, Cell3, Order
 
 
         # Адреса узлов в перменные
@@ -720,6 +727,8 @@ class OPCClient:
         START_RTK = 'ns=2;s=Application.UserInterface.OPC_start_RTK'
 
         OPC_RES_BRAK = 'ns=2;s=Application.UserInterface.OPC_res_brak'
+
+        OPC_DO_NEXT_TARA = 'ns=2;s=Application.UserInterface.OPC_do_next_tara'
 
         LOG = 'ns=2;s=Application.UserInterface.OPC_log'
         OPC_PAUSE_RTK = 'ns=2;s=Application.UserInterface.OPC_pause_RTK'
@@ -878,6 +887,12 @@ class OPCClient:
                             st7 = bool(self._read_bool(OPC_RESTART_RTK, False))
                             st8 = str(self._read_str(OPC_NAME, 'i.perekalskii'))
                             st9 = bool(self._read_bool(OPC_FINISH_ORDER, False))
+                            st10_raw = self._read_bool(OPC_DO_NEXT_TARA, None)
+
+                            if st10_raw is None:
+                                st10 = self.prev_next_tara
+                            else:
+                                st10 = bool(st10_raw)
 
 
                             with shared_data_lock:
@@ -890,6 +905,7 @@ class OPCClient:
                                 shared_data['OPC-DB']['OPC_restart_RTK'] = st7
                                 shared_data['OPC-DB']['OPC_name'] = st8
                                 shared_data['OPC-DB']['OPC_finish_order'] = st9
+                                shared_data['OPC-DB']['OPC_do_next_tara'] = st10
                                 
                             # logger4.debug(
                             #     f"[OPC] читаем флаги запуска из OPC и зеркалим в shared_data FLAGS | RTK={st4} | T1={st1} | T2={st2} | T3={st3} | "
@@ -907,6 +923,13 @@ class OPCClient:
                             Cell3 = 0
                             print(f"Cell3 = {Cell3}")
                         # ВАЖНО: OPC_Order обратно НЕ пишем, только читаем в отдельном блоке-детекторе выбора
+
+                        # Сброс счётчика новой тары по переднему фронту сигнала
+                        if st10 and not self.prev_next_tara:
+                            NEW_TRAY_REQUEST.set()
+                            logger4.info("[OPC] Получен запрос новой тары")
+                        self.prev_next_tara = st10
+
                     except Exception as e:
                         print(f"[OPC] write vitrina (basic+extra) failed: {e}")
 
@@ -1607,44 +1630,39 @@ class Table:
         for attempt in range(1, max_new_board_tries + 1):
 
             # ВАЖНО: до команды 210 проверяем, есть ли платы
-            if NO_MORE_NEW_BOARDS.is_set():
-                logger4.warning(
-                    f"Стол {self.number}: NO_MORE_NEW_BOARDS активен, 210 не отправляем"
-                )
-                return None
 
+            with shared_data_lock:
+                if NO_MORE_NEW_BOARDS.is_set():
+                    return None
+
+                if NEW_TRAY_REQUEST.is_set():
+                    old_cell = Cell1
+                    Cell1 = 0
+                    NEW_TRAY_REQUEST.clear()
+
+                    logger4.info(
+                        f"[MAIN] Новая тара принята. Cell1: {old_cell} -> 0"
+                    )
+
+                if Cell1 >= NEW_BOARD_CELL_LIMIT:
+                    NO_MORE_NEW_BOARDS.set()
+                    logger4.warning(
+                        f"[MAIN] Стол {self.number}: "
+                        f"достигнут лимит {NEW_BOARD_CELL_LIMIT}. Досушка"
+                    )
+                    return None
+
+                Cell1 += 1
+                reserved_cell = Cell1
+                Cell = reserved_cell
+                Tray_robot = 1
 
             logger4.info(
-                f"Стол {self.number}: попытка взять новую плату {attempt}/{max_new_board_tries}"
+                f"Стол {self.number}: забор платы из ячейки {Cell1}"
             )
 
-            # Отдельная проверка на достижение 60 при заборе из тары новых плат. когда кончились переводим в досушку
-            # Если уже брали плату из ячейки 60 — новые платы больше не берём
-            # Все 60 ячеек тары с новыми платами уже использованы
-            with shared_data_lock:
-                cell1_limit_reached = Cell1 >= NEW_BOARD_CELL_LIMIT
+            time.sleep(1)
 
-            if cell1_limit_reached:
-                logger4.warning(
-                    f"[MAIN] СТОЛ {self.number}: обработана последняя ячейка "
-                    f"тары новых плат Cell1={Cell1}. Переходим в режим досушки"
-                )
-
-                NO_MORE_NEW_BOARDS.set()
-                return None
-
-            # 1. Готовим номер ячейки, из которой робот возьмёт новую плату
-            Tray_robot = 1
-
-            with shared_data_lock:
-                opc_res_brak = shared_data['OPC-DB'].get('OPC_res_brak', False)
-
-            if opc_res_brak is False:
-                self._next_cell1()
-            else:
-                with shared_data_lock:
-                    Cell1 = 0
-                    Cell = Cell1
 
             time.sleep(1)
 
@@ -1704,7 +1722,7 @@ class Table:
             )
 
             ##################################
-            verified = True #Убери это проверка платы
+            # verified = True #Убери это проверка платы
             print(f"Внимание работа заглушки на проверку платы присвоили verified ={verified}")
             logger4.info(f"Внимание работа заглушки на проверку платы присвоили verified ={verified}")
             
@@ -3026,9 +3044,7 @@ if __name__ == "__main__":
     #         print (f"[MAIN]Штрих кода тары успешно получен {barcode}")
     #         break
 
-    # Блок обнуления ячейки при джостижении 60 плат
-    if Cell1 >= 60:
-        Cell1 = 1
+    
     
     # Блок подготовки столов
     while True:
