@@ -3,6 +3,7 @@ import logging
 import time
 import threading
 
+
 # Set up basic logging configuration
 logging.basicConfig(
     filename='RTK.log',
@@ -25,6 +26,7 @@ def get_qr_result():
             trigger_socket.connect((camera_ip, trigger_port))
             trigger_socket.sendall(b'start')
             logging.info("CAM Команда 'start' отправлена на порт %d.", trigger_port)
+            
 
         # Получение QR-результата
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as receive_socket:
@@ -33,6 +35,7 @@ def get_qr_result():
             data = receive_socket.recv(1024)  # QR код вряд ли больше
             result = result = data.decode('utf-8').strip().strip(';')  # Удаляет пробелы и ';'
             logging.info("CAM Получен QR результат: %s", result)
+            time.sleep(2)
             return result if result else None
 
     except Exception as e:
@@ -41,7 +44,7 @@ def get_qr_result():
 
 def photo():
     with _camera_lock:  # <--- КРИТИЧЕСКИЙ СЕКЦИЯ
-        attempts = 3
+        attempts = 2
         results = []
 
         for i in range(attempts):
@@ -68,24 +71,24 @@ def photo():
     
 
 
-res,data = photo()
-print (f"Result={res}  Data = {data}")
+# res,data = photo()
+# print (f"Result={res}  Data = {data}")
 
 
 
-for i in range(100):
-    try:
-        logging.debug(f"Попытка {i}: запрос фото с камеры")
-        res,photodata = photo()
-        print(f"С камеры получен ID {photodata}")
-    except Exception as e:
-        print(f"Ошибка: камера недоступна (photo camera not available). Детали: {e}")
-    time.sleep(1)
-while True:
-    res,photodata = photo()
-    if res != 200 or photodata == "NoRead":
-        print(f"Ошибка получения фото с камеры")
-        time.sleep(1)
-    else:
-        print(f"С камеры получено фото {photodata}")
-        break 
+# for i in range(100):
+#     try:
+#         logging.debug(f"Попытка {i}: запрос фото с камеры")
+#         res,photodata = photo()
+#         print(f"С камеры получен ID {photodata}")
+#     except Exception as e:
+#         print(f"Ошибка: камера недоступна (photo camera not available). Детали: {e}")
+#     time.sleep(1)
+# while True:
+#     res,photodata = photo()
+#     if res != 200 or photodata == "NoRead":
+#         print(f"Ошибка получения фото с камеры")
+#         time.sleep(1)
+#     else:
+#         print(f"С камеры получено фото {photodata}")
+#         break 

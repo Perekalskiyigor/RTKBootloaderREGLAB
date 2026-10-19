@@ -57,7 +57,7 @@ class IgleTable:
                 # Извлекаем параметры из данных
                 # Изменен формат для апи Моржова
                 stand_id = str(data.get('stand_id'))
-                stand_id = f"nt_cmpp_rtk_{stand_id.split('_')[-1]}"
+                stand_id = f"nt_psi_rtk_{stand_id.split('_')[-1]}"
                 
                 module_type = data.get('module_type')
                 data_matrix = photodata
