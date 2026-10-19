@@ -928,7 +928,7 @@ class OPCClient:
                         if st10 and not self.prev_next_tara:
                             NEW_TRAY_REQUEST.set()
                             logger4.info("[OPC] Получен запрос новой тары")
-                            opc_set(shared_data, 'OPC_log', "Дубровин ЛОХ и ЧЕРТ печальный/обиженный!")
+                            opc_set(shared_data, 'OPC_log', "Смена активной тары подтверждена")
                         self.prev_next_tara = st10
 
                     except Exception as e:
