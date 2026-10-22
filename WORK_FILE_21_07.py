@@ -100,7 +100,7 @@ Tray3 = 0 # результат (2 или 3) прошивки для 3 стола
 Tray_robot = 0
 
 
-NEW_BOARD_CELL_LIMIT = 60 # Максимальное кол-во плат при котором если робот его превышпет он уходит в режим досушки
+NEW_BOARD_CELL_LIMIT = 61 # Максимальное кол-во плат при котором если робот его превышпет он уходит в режим досушки
 
 Cell = 0   # номер ячейки, отдаваемый в Modbus (универсальный)
 Cell1 = 0  # ячейка тары с новыми платами
@@ -2140,9 +2140,13 @@ class Table:
             logger4.info(f"[MAIN] СТОЛ {self.number}: ждём робота для выгрузки ложе {loge}")
             time.sleep(1)
 
+
+        #Дубровин добавил сброс счетчика успешных плат cell2 при достижении 8 22_10_2026
         try:
             if result == 2:
                 Cell2 += 1
+                if Cell2 > 8:
+                    Cell2 = 0
                 Cell = Cell2
                 Tray_robot = 2
             else:
@@ -2496,8 +2500,12 @@ class Table:
 
                         Tray_robot = tr  # 2 или 3
                         self.pause_mode()
+                        
+                        #Дубровин добавил сброс счетчика успешных плат cell2 при достижении 8 22_10_2026
                         if tr == 2:
                             Cell2 += 1
+                            if Cell2 > 8:
+                                Cell2 = 0
                             Cell = Cell2
                         elif tr == 3:
                             Cell3 += 1
@@ -2659,9 +2667,13 @@ class Table:
                                     )
                                 self.pause_mode()
                                 # 3) Разложить по лоткам (успех -> 241, брак -> 242) и корректно проставить Cell
+                                
+                                #Дубровин добавил сброс счетчика успешных плат cell2 при достижении 8 22_10_2026
                                 Tray_robot = tr  # 2 или 3
                                 if tr == 2:
                                     Cell2 += 1
+                                    if Cell2 > 8:
+                                        Cell2 = 0
                                     Cell = Cell2
                                     time.sleep(1)  # дать Modbus прочитать
                                     if not self._send_robot_command(241):
