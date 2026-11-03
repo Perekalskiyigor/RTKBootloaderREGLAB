@@ -111,6 +111,7 @@ class OPCClient:
                     self.nodes.clear()
                     self.disabled_stubs.clear()
                     self.connected.set()
+                    logger4.info('OPC подключён: %s', OPC_URL)
 
                 # Читаем те же кнопки панели, что и в основном рабочем файле.
                 controls = {}
@@ -194,6 +195,7 @@ class ModbusProvider:
 
     def run_modbus_server(self):
         try:
+            logger4.info('Modbus-сервер запущен: %s:%s', *MODBUS_ADDRESS)
             self.server.serve_forever()
         except Exception as exc:
             logger4.exception('Ошибка Modbus')
@@ -214,6 +216,7 @@ class ModbusProvider:
         if EMERGENCY_STOP.is_set() or STOP_PROGRAM.is_set():
             return False
         self.store.setValues(3, 4, [command])
+        logger4.info('Команда %s отправлена роботу; ожидаем подтверждение в регистре 5', command)
         start_time = time.monotonic()
         try:
             while time.monotonic() - start_time < timeout_s:
@@ -221,6 +224,7 @@ class ModbusProvider:
                     return False
                 result = self.store.getValues(3, 5, count=1)[0]
                 if result == command:
+                    logger4.info('Робот подтвердил выполнение команды %s', command)
                     return True
                 if result == 404:
                     trigger_emergency(f'Робот вернул 404 для команды {command}')
@@ -311,12 +315,19 @@ def robo_main_cycle(modbus_provider):
 
 
 def main():
-    logging.basicConfig(filename='TrayTransfer.log', level=logging.INFO,
-                        format='%(asctime)s - MAIN - %(levelname)s - %(message)s', encoding='utf-8')
+    # Одни и те же сообщения выводим в консоль и сохраняем в файл.
+    logging.basicConfig(level=logging.INFO,
+                        format='%(asctime)s - MAIN - %(levelname)s - %(message)s',
+                        handlers=[logging.FileHandler('TrayTransfer.log', encoding='utf-8'),
+                                  logging.StreamHandler()])
     # Убираем служебные сообщения OPC о каждом пакете; предупреждения и ошибки остаются.
     logging.getLogger('opcua').setLevel(logging.WARNING)
+    logger4.info('Программа перекладки запущена: исходная тара — %s ячеек, готовая — %s',
+                 NEW_BOARD_CELL_LIMIT, READY_BOARD_CELL_LIMIT)
+    logger4.info('Активны заглушки: автоматический старт, пауза отключена')
     modbus_provider = ModbusProvider()
     opc_client = OPCClient(OPC_URL)
+    logger4.info('Ожидание подключения OPC: %s', OPC_URL)
     modbus_provider.server_thread.start()
     opc_client.update_thread.start()
     try:
