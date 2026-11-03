@@ -2145,8 +2145,8 @@ class Table:
         try:
             if result == 2:
                 Cell2 += 1
-                if Cell2 > 8:
-                    Cell2 = 0
+                if Cell2 == 9:
+                    Cell2 = 1
                 Cell = Cell2
                 Tray_robot = 2
             else:
@@ -2504,8 +2504,8 @@ class Table:
                         #Дубровин добавил сброс счетчика успешных плат cell2 при достижении 8 22_10_2026
                         if tr == 2:
                             Cell2 += 1
-                            if Cell2 > 8:
-                                Cell2 = 0
+                            if Cell2 == 9:
+                                Cell2 = 1
                             Cell = Cell2
                         elif tr == 3:
                             Cell3 += 1
@@ -2672,8 +2672,8 @@ class Table:
                                 Tray_robot = tr  # 2 или 3
                                 if tr == 2:
                                     Cell2 += 1
-                                    if Cell2 > 8:
-                                        Cell2 = 0
+                                    if Cell2 == 9:
+                                        Cell2 = 1
                                     Cell = Cell2
                                     time.sleep(1)  # дать Modbus прочитать
                                     if not self._send_robot_command(241):
