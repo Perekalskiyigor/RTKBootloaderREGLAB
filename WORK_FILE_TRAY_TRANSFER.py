@@ -120,6 +120,12 @@ class OPCClient:
                     if not isinstance(value, bool):
                         raise ValueError(f'{name}: ожидался BOOL')
                     controls['OPC_START_RTK' if name == 'OPC_start_RTK' else name] = value
+
+                # ВРЕМЕННЫЕ ЗАГЛУШКИ ПОСЛЕ ЧТЕНИЯ OPC: автоматический старт без паузы.
+                # Для управления с панели закомментировать следующие две строки.
+                controls['OPC_START_RTK'] = True
+                controls['OPC_pause_RTK'] = False
+
                 with shared_data_lock:
                     shared_data['OPC-DB'].update(controls)
                     opcdb = dict(shared_data['OPC-DB'])
@@ -313,6 +319,8 @@ def robo_main_cycle(modbus_provider):
 def main():
     logging.basicConfig(filename='TrayTransfer.log', level=logging.INFO,
                         format='%(asctime)s - MAIN - %(levelname)s - %(message)s', encoding='utf-8')
+    # Убираем служебные сообщения OPC о каждом пакете; предупреждения и ошибки остаются.
+    logging.getLogger('opcua').setLevel(logging.WARNING)
     modbus_provider = ModbusProvider()
     opc_client = OPCClient(OPC_URL)
     modbus_provider.server_thread.start()
