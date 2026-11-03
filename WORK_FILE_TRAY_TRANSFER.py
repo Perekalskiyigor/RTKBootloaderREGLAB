@@ -130,6 +130,11 @@ class OPCClient:
                 with shared_data_lock:
                     shared_data['OPC-DB'].update(controls)
                     opcdb = dict(shared_data['OPC-DB'])
+                    
+                # ВРЕМЕННЫЕ ЗАГЛУШКИ ПОСЛЕ ЧТЕНИЯ OPC: автоматический старт без паузы.
+                # Для управления с панели закомментировать следующие две строки.
+                controls['OPC_START_RTK'] = True
+                controls['OPC_pause_RTK'] = False
 
                 # Один флаг для запроса и подтверждения замены ГОТОВОЙ тары.
                 # True пишем один раз: иначе затрём сброс False, поступивший от ПЛК.
@@ -242,6 +247,7 @@ def wait_for_start():
     while not EMERGENCY_STOP.is_set() and not STOP_PROGRAM.is_set():
         with shared_data_lock:
             opcdb = shared_data['OPC-DB']
+            
             enabled = opcdb['OPC_START_RTK'] and not opcdb['OPC_pause_RTK']
         if enabled:
             return True
