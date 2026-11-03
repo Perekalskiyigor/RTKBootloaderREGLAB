@@ -6,7 +6,8 @@ import WORK_FILE_TRAY_TRANSFER as app
 
 class TransferTests(unittest.TestCase):
     def setUp(self):
-        app.Cell = app.Cell1 = app.Cell2 = app.Tray_robot = 0
+        app.Cell = app.Cell1 = app.Cell2 = 0
+        app.Tray_robot = 2
         app.EMERGENCY_STOP.clear()
         app.READY_TRAY_REPLACED.clear()
         app.STOP_PROGRAM.clear()
@@ -33,10 +34,12 @@ class TransferTests(unittest.TestCase):
         with patch.object(app.READY_TRAY_REPLACED, 'wait', side_effect=acknowledge):
             app.robo_main_cycle(self.bus)
         expected = [command for cell in range(1, 62)
-                    for command in ((210, 1, cell), (241, 2, (cell - 1) % 4 + 1))]
+                    for command in ((211, 2, cell), (241, 2, (cell - 1) % 4 + 1))]
         self.assertEqual(self.commands, expected)
         self.assertEqual(batches, list(range(4, 61, 4)))
         self.assertEqual((app.Cell1, app.Cell2), (61, 1))
+        self.assertEqual(app.Tray_robot, 2)
+        self.assertTrue(all(call.args[1] != 6 for call in self.bus.store.setValues.call_args_list))
         self.assertFalse(app.shared_data['OPC-DB']['OPC_end_order'])
 
     def test_full_tray_blocks_next_pick(self):
@@ -61,18 +64,18 @@ class TransferTests(unittest.TestCase):
         self.bus._send_robot_command.side_effect = [False]
         self.assertFalse(app.transfer_board(self.bus))
         self.assertEqual((app.Cell1, app.Cell2), (0, 0))
-        self.bus._send_robot_command.assert_called_once_with(210)
+        self.bus._send_robot_command.assert_called_once_with(211)
 
     def test_finish_requested_during_pick_still_places_board(self):
         def command(value):
             self.commands.append(value)
-            if value == 210:
+            if value == 211:
                 app.opc_set('OPC_finish_order', True)
             return True
 
         self.bus._send_robot_command.side_effect = command
         app.robo_main_cycle(self.bus)
-        self.assertEqual(self.commands, [210, 241])
+        self.assertEqual(self.commands, [211, 241])
         self.assertEqual(app.Cell2, 1)
 
     def test_opc_waits_for_plc_to_clear_full_flag_without_overwriting_it(self):
@@ -124,7 +127,7 @@ class TransferTests(unittest.TestCase):
         bus.store = Mock()
         bus.store.getValues.return_value = [404]
         with patch.object(app.time, 'sleep'):
-            self.assertFalse(bus._send_robot_command(210))
+            self.assertFalse(bus._send_robot_command(211))
         self.assertTrue(app.EMERGENCY_STOP.is_set())
         self.assertEqual(bus.store.setValues.call_args.args, (3, 4, [0]))
 

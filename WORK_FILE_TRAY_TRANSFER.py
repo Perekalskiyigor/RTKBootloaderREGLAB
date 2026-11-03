@@ -24,7 +24,7 @@ MODBUS_ADDRESS = ("192.168.1.100", 502)
 Cell = 0
 Cell1 = 0  # Сколько плат взято из новой тары: 0..61.
 Cell2 = 0  # Сколько готовых ячеек заполнено: 0..4.
-Tray_robot = 0
+Tray_robot = 2  # Постоянная готовая тара; исходный ящик выбирается командой 211.
 
 
 EMERGENCY_STOP = threading.Event()
@@ -197,6 +197,7 @@ class ModbusProvider:
         # Выходы движения столов/прошивальщиков/подготовки оставляем нулевыми.
         for address in (0, 2, 10, 12, 18, 20, 24, 25):
             self.store.setValues(3, address, [0])
+        self.store.setValues(3, 6, [Tray_robot])
 
     def run_modbus_server(self):
         try:
@@ -211,7 +212,7 @@ class ModbusProvider:
 
     def _send_robot_command(self, command, timeout_s=ROBOT_TIMEOUT):
         # Тот же обмен: Rob_Action (4) -> sub_Rob_Action (5).
-        # Убраны только команды столов: здесь используются 210 и 241.
+        # 211 — забор из ящика, 241 — укладка в готовую тару. Tray всегда равен 2.
         if EMERGENCY_STOP.is_set() or STOP_PROGRAM.is_set():
             return False
         self.store.setValues(3, 6, [Tray_robot])
@@ -272,12 +273,11 @@ def wait_for_ready_tray():
 
 
 def transfer_board(modbus_provider):
-    global Cell, Cell1, Cell2, Tray_robot
+    global Cell, Cell1, Cell2
     # Вместо setup/прошивки/ложементов — только забор и сразу укладка в готовую тару.
     Cell = Cell1 + 1
-    Tray_robot = 1
     log_message(f'Забор платы из новой тары, ячейка {Cell}')
-    if not modbus_provider._send_robot_command(210):
+    if not modbus_provider._send_robot_command(211):
         return False
     Cell1 += 1
     opc_set('OPC_cnt_newBoard', NEW_BOARD_CELL_LIMIT - Cell1)
@@ -285,15 +285,13 @@ def transfer_board(modbus_provider):
     if not wait_for_start():
         return False
     Cell = Cell2 + 1
-    Tray_robot = 2
     log_message(f'Укладка платы в готовую тару, ячейка {Cell}/4')
     if not modbus_provider._send_robot_command(241):
         return False
     Cell2 += 1  # Учитываем только подтверждённую укладку.
     opc_set('OPC_success_count', Cell1)
     Cell = 0
-    Tray_robot = 0
-    modbus_provider.store.setValues(3, 6, [0])
+    # Tray не сбрасываем: готовая тара постоянная, меняются только ячейки.
     modbus_provider.store.setValues(3, 8, [0])
     return True
 
