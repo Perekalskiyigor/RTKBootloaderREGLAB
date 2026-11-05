@@ -85,6 +85,7 @@ class TransferTests(unittest.TestCase):
         opc._write_stub = Mock()
         controls = dict.fromkeys(('OPC_start_RTK', 'OPC_pause_RTK', 'OPC_restart_RTK',
                                   'OPC_finish_order', 'OPC_ready_tray_full'), False)
+        controls['OPC_name'] = 'operator'
         def write(name, value, vtype):
             if name == 'OPC_ready_tray_full':
                 controls[name] = value

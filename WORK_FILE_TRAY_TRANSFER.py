@@ -51,6 +51,7 @@ shared_data = {
         'OPC_nonsuccess_count': 0,
         'OPC_nameboard': 'Перекладка плат',
         'OPC_firmware': '',
+        'OPC_name': '',
         'OPC_log': 'Ожидание старта перекладки',
     }
 }
@@ -78,6 +79,7 @@ class OPCClient:
     def __init__(self, url):
         self.client = Client(url, timeout=3)
         self.connected = threading.Event()
+        self.user_ready = threading.Event()
         self.ready_full_sent = False
         self.nodes = {}
         self.disabled_stubs = set()
@@ -118,6 +120,10 @@ class OPCClient:
 
                 # Читаем те же кнопки панели, что и в основном рабочем файле.
                 controls = {}
+                user = self.node('OPC_name').get_value()
+                if not isinstance(user, str):
+                    raise ValueError('OPC_name: ожидался STRING')
+                controls['OPC_name'] = user.strip()
                 for name in ('OPC_start_RTK', 'OPC_pause_RTK', 'OPC_restart_RTK',
                              'OPC_finish_order'):
                     value = self.node(name).get_value()
@@ -133,6 +139,10 @@ class OPCClient:
                 with shared_data_lock:
                     shared_data['OPC-DB'].update(controls)
                     opcdb = dict(shared_data['OPC-DB'])
+                if controls['OPC_name']:
+                    self.user_ready.set()
+                else:
+                    self.user_ready.clear()
                     
                 # ВРЕМЕННЫЕ ЗАГЛУШКИ ПОСЛЕ ЧТЕНИЯ OPC: автоматический старт без паузы.
                 # Для управления с панели закомментировать следующие две строки.
@@ -178,6 +188,7 @@ class OPCClient:
                 if self.connected.is_set():
                     trigger_emergency(f'Ошибка OPC: {exc}')
                 self.connected.clear()
+                self.user_ready.clear()
                 logger4.exception('Ошибка OPC; повтор подключения через 5 секунд')
                 try:
                     self.client.disconnect()
@@ -334,13 +345,16 @@ def main():
     logger4.info('Активны заглушки: автоматический старт, пауза отключена')
     modbus_provider = ModbusProvider()
     opc_client = OPCClient(OPC_URL)
-    logger4.info('Ожидание подключения OPC: %s', OPC_URL)
+    logger4.info('Ожидание подключения OPC и имени оператора OPC_name: %s', OPC_URL)
     modbus_provider.server_thread.start()
     opc_client.update_thread.start()
     try:
-        while not opc_client.connected.wait(0.1):
+        while not opc_client.user_ready.wait(0.1):
             if EMERGENCY_STOP.is_set():
                 return
+        with shared_data_lock:
+            user = shared_data['OPC-DB']['OPC_name']
+        SQLite.insert_log_for1C(description="Запущен режим Только перекладка", user=user)
         robo_main_cycle(modbus_provider)
         # После завершения сохраняем OPC-витрину и счётчики до закрытия программы.
         while not STOP_PROGRAM.wait(0.5):
@@ -360,7 +374,5 @@ def main():
 
 
 if __name__ == '__main__':
-    opc_set(shared_data, 'OPC_log', "Старт режима Только перекладка")
-    SQLite.insert_log_for1C(description="Запущен режим Только перекладка", user=user)
-    logger4.info("[MAIN]старт  скрипта Только перекладка")
+    opc_set('OPC_log', "Старт режима Только перекладка")
     main()
