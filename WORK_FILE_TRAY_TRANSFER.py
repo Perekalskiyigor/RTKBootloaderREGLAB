@@ -5,9 +5,12 @@ python WORK_FILE_TRAY_TRANSFER.py
 Python выставляет OPC_ready_tray_full, ПЛК сбрасывает его после замены готовой тары.
 """
 
+# python -m PyInstaller --onefile WORK_FILE_TRAY_TRANSFER.py
+
 import logging
 import threading
 import time
+import SQLite
 
 from opcua import Client, ua
 from pymodbus.server.sync import ModbusTcpServer
@@ -357,4 +360,7 @@ def main():
 
 
 if __name__ == '__main__':
+    opc_set(shared_data, 'OPC_log', "Старт режима Только перекладка")
+    SQLite.insert_log_for1C(description="Запущен режим Только перекладка", user=user)
+    logger4.info("[MAIN]старт  скрипта Только перекладка")
     main()

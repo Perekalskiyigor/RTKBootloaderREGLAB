@@ -1,4 +1,4 @@
-# python -m PyInstaller --onefile деморежим.py
+# python -m PyInstaller --onefile WORK_DEMO.py
 import logging
 import time
 from pymodbus.server.sync import StartTcpServer
@@ -2962,6 +2962,9 @@ def run_table_pipeline(table: Table, do_defence=True, do_setup=True):
 
 
 if __name__ == "__main__":
+    opc_set(shared_data, 'OPC_log', "Старт режима ДЕМО")
+    SQLite.insert_log_for1C(description="Запущен режим ДЕМО", user=user)
+    logger4.info("[MAIN]старт  скрипта ДЕМО")
     SQLite.insert_log_for1C(description="Включение РТК", user=user)
     SQLite.insert_log_for1C(description="Авторизация оператора", user=user)
 

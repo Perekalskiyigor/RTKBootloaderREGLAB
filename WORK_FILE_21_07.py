@@ -2951,6 +2951,8 @@ def run_table_pipeline(table: Table, do_defence=True, do_setup=True):
 
 
 if __name__ == "__main__":
+    opc_set(shared_data, 'OPC_log', "Старт рабочего режима")
+    SQLite.insert_log_for1C(description="Запущен рабочий режим", user=user)
     SQLite.insert_log_for1C(description="Включение РТК", user=user)
     SQLite.insert_log_for1C(description="Авторизация оператора", user=user)
 
