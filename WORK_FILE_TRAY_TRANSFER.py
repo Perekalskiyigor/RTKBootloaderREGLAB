@@ -333,6 +333,7 @@ def robo_main_cycle(modbus_provider):
 
 
 def main():
+    
     # Одни и те же сообщения выводим в консоль и сохраняем в файл.
     logging.basicConfig(level=logging.INFO,
                         format='%(asctime)s - MAIN - %(levelname)s - %(message)s',
@@ -354,7 +355,17 @@ def main():
                 return
         with shared_data_lock:
             user = shared_data['OPC-DB']['OPC_name']
-        SQLite.insert_log_for1C(description="Запущен режим Только перекладка", user=user)
+        SQLite.insert_log_for1C(
+            description="Запущен режим Только перекладка",
+            user=user
+        )
+
+        log_message('Старт режима Только перекладка')
+
+        # Даем OPC-потоку отправить сообщение,
+        # а ПЛК — обработать его
+        time.sleep(2)
+
         robo_main_cycle(modbus_provider)
         # После завершения сохраняем OPC-витрину и счётчики до закрытия программы.
         while not STOP_PROGRAM.wait(0.5):
@@ -374,5 +385,4 @@ def main():
 
 
 if __name__ == '__main__':
-    opc_set('OPC_log', "Старт режима Только перекладка")
     main()
