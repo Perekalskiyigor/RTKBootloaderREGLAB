@@ -208,7 +208,7 @@ class ModbusProvider:
         self.server = ModbusTcpServer(
             ModbusServerContext(slaves=self.store, single=True), address=MODBUS_ADDRESS)
         self.server_thread = threading.Thread(target=self.run_modbus_server, daemon=True)
-        # Выходы движения столов/прошивальщиков/подготовки оставляем нулевыми.
+        # Начальные значения выходов движения столов/прошивальщиков/подготовки.
         for address in (0, 2, 10, 12, 18, 20, 24, 25):
             self.store.setValues(3, address, [0])
         self.store.setValues(3, 6, [Tray_robot])
@@ -256,6 +256,26 @@ class ModbusProvider:
             self.store.setValues(3, 4, [0])
             # ПЛК должен увидеть ноль между соседними командами.
             time.sleep(1)
+
+
+def prepare_tables(modbus_provider):
+    # Как в рабочем режиме: SETUP_TABLE (25) -> SUB_SETUP_TABLE (26).
+    log_message('Ожидание от регула, что столы в начальной позиции')
+    try:
+        if EMERGENCY_STOP.is_set() or STOP_PROGRAM.is_set():
+            return False
+        modbus_provider.store.setValues(3, 25, [1])
+        while not EMERGENCY_STOP.is_set() and not STOP_PROGRAM.is_set():
+            if STOP_PROGRAM.wait(1):
+                return False
+            if EMERGENCY_STOP.is_set():
+                return False
+            if modbus_provider.store.getValues(3, 26, count=1)[0] == 1:
+                log_message('Система подготовлена к работе')
+                return True
+        return False
+    finally:
+        modbus_provider.store.setValues(3, 25, [0])
 
 
 def wait_for_start():
@@ -366,6 +386,8 @@ def main():
         # а ПЛК — обработать его
         time.sleep(2)
 
+        if not prepare_tables(modbus_provider):
+            return
         robo_main_cycle(modbus_provider)
         # После завершения сохраняем OPC-витрину и счётчики до закрытия программы.
         while not STOP_PROGRAM.wait(0.5):
