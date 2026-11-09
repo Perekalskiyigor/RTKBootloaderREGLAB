@@ -15,6 +15,9 @@ import Mertech_scanner
 import BoardAprove
 #import TrayVision
 
+from ReadyTrays import ReadyTrays, TrayStateError
+
+
 
 
 # --- Глобальная аварийная остановка всего комплекса ---
@@ -257,6 +260,8 @@ shared_data = {
 
 shared_data_lock = threading.Lock()
 
+# Общий менеджер двух пневмокареток
+ready_trays = ReadyTrays(max_state_age=3.0)
 
 
 
@@ -569,6 +574,37 @@ class OPCClient:
             f"[OPC] Запись в опс завершилась ошибкой | nodeid={nodeid} | value={value} | type={vtype} | error={e}")
             print(f"[OPC] write fail {nodeid}: {e}")
 
+    # ////////////////////Пневмократеки
+    def read_karetka(self, name):
+        nodeid = f'ns=2;s=Application.UserInterface.{name}'
+        node = self._get_node(nodeid)
+
+        if node is None:
+            raise RuntimeError(f'Не найден OPC-узел: {nodeid}')
+
+        value = node.get_value()
+
+        if type(value) is not bool:
+            raise RuntimeError(f'Неверный тип OPC-узла: {nodeid}')
+
+        return value
+
+
+    def write_karetka(self, name, value):
+        nodeid = f'ns=2;s=Application.UserInterface.{name}'
+        node = self._get_node(nodeid)
+
+        if node is None:
+            raise RuntimeError(f'Не найден OPC-узел: {nodeid}')
+
+        node.set_value(
+            ua.DataValue(
+                ua.Variant(value, ua.VariantType.Boolean)
+            )
+        )
+
+    #//////////////////////////////////
+
     def _read_bool(self, nodeid, default=0):
         node = self._get_node(nodeid)
         if not node:
@@ -753,10 +789,19 @@ class OPCClient:
         while not self.stop_event.is_set():
             try:
                 if not self.is_connected():
+                    ready_trays.connection_lost()
                     time.sleep(0.5)
                     continue
 
                 with self.lock:
+
+                    # Пневмокаретки/////////////////
+                    # Синхронизация двух кареток с Regul
+                    ready_trays.sync_opc(
+                        self.read_karetka,
+                        self.write_karetka
+                    )
+                    # /////////////////
                     
                     # ---------- 1) READ: кнопки из OPC ----------
                     try:
@@ -1046,10 +1091,17 @@ class OPCClient:
                     # except Exception as e:
                     #     print(f"[OPC] push table states failed: {e}")
 
+            except TrayStateError as e:
+                ready_trays.connection_lost()
+                logger4.error(f"[KARETKA] Ошибка состояния: {e}")
+                trigger_emergency(f"Каретки: {e}")
+
             except Exception as e:
-                print(f"Critical error in update loop: {e}")
+                ready_trays.connection_lost()
+                logger4.exception(f"[OPC] Ошибка цикла обмена: {e}")
 
             time.sleep(0.5)
+
 
     def stop(self):
         """Clean shutdown"""
@@ -1061,6 +1113,8 @@ class OPCClient:
                 logger4.info("[OPC] Client disconnected")
             except Exception as e:
                 logger4.exception(f"[OPC] Client disconnect failed: {e}")
+
+    
 
 
 
@@ -2143,36 +2197,70 @@ class Table:
 
         #Дубровин добавил сброс счетчика успешных плат cell2 при достижении 8 22_10_2026
         try:
+            slot = None
+
             if result == 2:
-                Cell2 += 1
-                if Cell2 == 9:
-                    Cell2 = 1
-                Cell = Cell2
+                slot = ready_trays.wait_and_reserve_slot(
+                    EMERGENCY_STOP
+                )
+
+                if slot is None:
+                    raise TableOperationFailed(
+                        "Ожидание каретки прервано"
+                    )
+
+                Cell = slot['cell']
                 Tray_robot = 2
+
             else:
                 Cell3 += 1
                 Cell = Cell3
                 Tray_robot = 3
 
-            logger4.warning(
-                f"[MAIN] СТОЛ {self.number}: робот захвачен, выгрузка ложе={loge}, "
-                f"result={result}, Tray_robot={Tray_robot}, Cell={Cell}"
+            logger4.info(
+                f"[MAIN] СТОЛ {self.number}: "
+                f"выгрузка ложе={loge}, "
+                f"Tray_robot={Tray_robot}, Cell={Cell}"
             )
 
             time.sleep(1)
 
+            # Сначала забираем плату с ложемента
             if not self._send_robot_command(230, cell_num=loge):
-                raise TableOperationFailed(f"Ошибка забора платы с ложемента {loge}")
+                if slot is not None:
+                    ready_trays.placement_failed(
+                        slot, "Не подтверждён забор платы 230"
+                    )
+                raise TableOperationFailed(
+                    f"Ошибка забора платы с ложемента {loge}"
+                )
 
+            # Затем укладываем в каретку или брак
             if result == 2:
+                ready_trays.check_before_placement(slot)
+
                 if not self._send_robot_command(241):
-                    raise TableOperationFailed("Ошибка укладки в тару успеха 241")
+                    ready_trays.placement_failed(
+                        slot, "Не подтверждена укладка 241"
+                    )
+                    raise TableOperationFailed(
+                        "Ошибка укладки в каретку 241"
+                    )
+
+                ready_trays.confirm_placement(slot)
+
+                logger4.info(
+                    f"[KARETKA] Стол {self.number}: "
+                    f"каретка {slot['cart']}, "
+                    f"ячейка {slot['cell']} заполнена"
+                )
+
             else:
                 if not self._send_robot_command(242):
-                    raise TableOperationFailed("Ошибка укладки в тару брака 242")
+                    raise TableOperationFailed(
+                        "Ошибка укладки в тару брака 242"
+                    )
 
-            Tray_robot = 0
-            Cell = 0
             self._mark_loge_empty(loge)
 
         finally:
@@ -2502,33 +2590,92 @@ class Table:
                         self.pause_mode()
                         
                         #Дубровин добавил сброс счетчика успешных плат cell2 при достижении 8 22_10_2026
+                        # ///////////////////Новая логика с наенвмокареткой
+                        # Выгрузка обработанной платы
+                        slot = None
+
                         if tr == 2:
-                            Cell2 += 1
-                            if Cell2 == 9:
-                                Cell2 = 1
-                            Cell = Cell2
+                            # Резервируем ячейку готовой продукции
+                            slot = ready_trays.wait_and_reserve_slot(
+                                EMERGENCY_STOP
+                            )
+
+                            if slot is None:
+                                raise TableOperationFailed(
+                                    "Ожидание свободной каретки прервано"
+                                )
+
+                            Cell = slot['cell']
+
+                            logger4.info(
+                                f"[KARETKA] Стол {self.number}: "
+                                f"каретка {slot['cart']}, ячейка {Cell}"
+                            )
+
                         elif tr == 3:
                             Cell3 += 1
                             Cell = Cell3
-                        else:
-                            # на всякий случай
-                            raise RuntimeError(f"Неожиданный номер трея для укладки: {tr}")
 
-                        time.sleep(1)  # дать Modbus прочитать
-                        # снять обработанную
-                        if not self._send_robot_command(230, cell_num=current_loge):
-                            raise TableOperationFailed(f"Ошибка забора с ложемента {current_loge}")
-                        logger4.info(f"[MAIN] СТОЛ {self.number} Забираем обработанную плату с ложемента {current_loge}")
+                        else:
+                            raise TableOperationFailed(
+                                f"Неожиданный результат прошивки: {tr}"
+                            )
+
+                        time.sleep(1)  # Дать Modbus передать номер ячейки
+
+                        # 1. Забираем плату с ложемента
+                        if not self._send_robot_command(
+                            230, cell_num=current_loge
+                        ):
+                            if slot is not None:
+                                ready_trays.placement_failed(
+                                    slot, "Ошибка забора платы 230"
+                                )
+
+                            raise TableOperationFailed(
+                                f"Ошибка забора с ложемента {current_loge}"
+                            )
+
+                        logger4.info(
+                            f"[MAIN] Стол {self.number}: "
+                            f"плата забрана с ложемента {current_loge}"
+                        )
+
+                        # 2. Укладываем плату
                         if tr == 2:
-                            if not self._send_robot_command(241): 
-                                raise TableOperationFailed("Ошибка укладки в тару")
-                            logger4.info(f"[MAIN] СТОЛ {self.number} Укладываем плату в тару с упешно прошитыми платами (с ложе {current_loge})")
-                            Cell=0 # чистим CEll модбаса
+                            ready_trays.check_before_placement(slot)
+
+                            if not self._send_robot_command(241):
+                                ready_trays.placement_failed(
+                                    slot, "Ошибка укладки 241"
+                                )
+                                raise TableOperationFailed(
+                                    "Ошибка укладки готовой платы 241"
+                                )
+
+                            # Подтверждаем заполнение ячейки
+                            ready_trays.confirm_placement(slot)
+
+                            logger4.info(
+                                f"[KARETKA] Стол {self.number}: "
+                                f"плата уложена, каретка {slot['cart']}, "
+                                f"ячейка {slot['cell']}"
+                            )
+
                         else:
                             if not self._send_robot_command(242):
-                                raise TableOperationFailed("Ошибка укладки в тару")
-                            logger4.info(f"[MAIN] СТОЛ {self.number} Укладываем плату в тару брака (с ложе {current_loge})")
-                            Cell=0 # чистим CEll модбаса
+                                raise TableOperationFailed(
+                                    "Ошибка укладки брака 242"
+                                )
+
+                            logger4.info(
+                                f"[MAIN] Стол {self.number}: "
+                                f"плата уложена в тару брака, ячейка {Cell}"
+                            )
+
+                        Cell = 0
+                        # ///////////////////
+                        
                         tr = 0
                         self._mark_loge_empty(current_loge) # отметка сотсояния ложемента
                         self._log_loge_states(f"AFTER EMPTY loge={current_loge}")
@@ -2670,14 +2817,51 @@ class Table:
                                 
                                 #Дубровин добавил сброс счетчика успешных плат cell2 при достижении 8 22_10_2026
                                 Tray_robot = tr  # 2 или 3
+
+                                # менеджер управлеия пневмокареткой//////////////////////////
                                 if tr == 2:
-                                    Cell2 += 1
-                                    if Cell2 == 9:
-                                        Cell2 = 1
-                                    Cell = Cell2
-                                    time.sleep(1)  # дать Modbus прочитать
+                                    # Ждём свободную ячейку в одной из двух кареток
+                                    slot = ready_trays.wait_and_reserve_slot(
+                                        EMERGENCY_STOP
+                                    )
+
+                                    if slot is None:
+                                        raise TableOperationFailed(
+                                            "Ожидание каретки прервано аварийной остановкой"
+                                        )
+
+                                    Cell = slot['cell']
+
+                                    logger4.info(
+                                        f"[KARETKA] Стол {self.number}: "
+                                        f"каретка {slot['cart']}, ячейка {Cell}"
+                                    )
+
+                                    # Даём Modbus передать номер ячейки
+                                    time.sleep(1)
+
+                                    # Проверяем каретку непосредственно перед укладкой
+                                    ready_trays.check_before_placement(slot)
+
+                                    # Команда роботу на укладку
                                     if not self._send_robot_command(241):
-                                        raise TableOperationFailed("Ошибка укладки в тару успеха (241)")
+                                        ready_trays.placement_failed(
+                                            slot,
+                                            "Робот не подтвердил команду 241"
+                                        )
+                                        raise TableOperationFailed(
+                                            "Ошибка укладки готовой платы 241"
+                                        )
+
+                                    # Только после успешной укладки увеличиваем счётчик
+                                    ready_trays.confirm_placement(slot)
+
+                                    logger4.info(
+                                        f"[KARETKA] Стол {self.number}: "
+                                        f"плата уложена в ячейку {Cell}"
+                                    )
+                                # /////////////////////////////////////////
+                                
                                     logger4.info(f"[MAIN] СТОЛ {self.number} уложили плату в тару успеха (с ложе {current_loge})")
                                 elif tr == 3:
                                     Cell3 += 1

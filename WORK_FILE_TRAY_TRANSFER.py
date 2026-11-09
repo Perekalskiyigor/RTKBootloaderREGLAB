@@ -15,6 +15,7 @@ import SQLite
 from opcua import Client, ua
 from pymodbus.server.sync import ModbusTcpServer
 from pymodbus.datastore import ModbusSequentialDataBlock, ModbusSlaveContext, ModbusServerContext
+from ReadyTrays import ReadyTrays, TrayStateError
 
 
 # Сохраняем имена счётчиков и адреса оборудования из рабочего файла.
@@ -31,6 +32,8 @@ Tray_robot = 2  # Постоянная готовая тара; исходный
 
 
 EMERGENCY_STOP = threading.Event()
+# Общий менеджер двух пневмокареток
+ready_trays = ReadyTrays(max_state_age=3.0)
 READY_TRAY_REPLACED = threading.Event()
 STOP_PROGRAM = threading.Event()
 shared_data_lock = threading.Lock()
@@ -85,12 +88,41 @@ class OPCClient:
         self.disabled_stubs = set()
         self.update_thread = threading.Thread(target=self.update_registers, daemon=True)
 
+        # ================= ПНЕВМОКАРЕТКИ =================
+
+    def read_karetka(self, name):
+        if not self.connected.is_set():
+            raise RuntimeError("OPC отключён")
+
+        node = self.node(name)
+        value = node.get_value()
+
+        if type(value) is not bool:
+            raise RuntimeError(
+                f"Неверный тип OPC-узла каретки: {name}"
+            )
+
+        return value
+
+    def write_karetka(self, name, value):
+        if not self.connected.is_set():
+            raise RuntimeError("OPC отключён")
+
+        self._write(
+            name,
+            bool(value),
+            ua.VariantType.Boolean
+        )
+
+    # =================================================
+
     def node(self, name, group='UserInterface'):
         nodeid = f'ns=2;s=Application.{group}.{name}'
         if nodeid not in self.nodes:
             self.nodes[nodeid] = self.client.get_node(nodeid)
         return self.nodes[nodeid]
 
+    
     def _write(self, name, value, vtype, group='UserInterface'):
         self.node(name, group).set_value(ua.DataValue(ua.Variant(value, vtype)))
 
@@ -118,6 +150,12 @@ class OPCClient:
                     self.connected.set()
                     logger4.info('OPC подключён: %s', OPC_URL)
 
+                # Синхронизация двух пневмокареток с Regul
+                ready_trays.sync_opc(
+                    self.read_karetka,
+                    self.write_karetka
+                )
+
                 # Читаем те же кнопки панели, что и в основном рабочем файле.
                 controls = {}
                 user = self.node('OPC_name').get_value()
@@ -131,10 +169,6 @@ class OPCClient:
                         raise ValueError(f'{name}: ожидался BOOL')
                     controls['OPC_START_RTK' if name == 'OPC_start_RTK' else name] = value
 
-                # ВРЕМЕННЫЕ ЗАГЛУШКИ ПОСЛЕ ЧТЕНИЯ OPC: автоматический старт без паузы.
-                # Для управления с панели закомментировать следующие две строки.
-                controls['OPC_START_RTK'] = True
-                controls['OPC_pause_RTK'] = False
 
                 with shared_data_lock:
                     shared_data['OPC-DB'].update(controls)
@@ -144,25 +178,7 @@ class OPCClient:
                 else:
                     self.user_ready.clear()
                     
-                # ВРЕМЕННЫЕ ЗАГЛУШКИ ПОСЛЕ ЧТЕНИЯ OPC: автоматический старт без паузы.
-                # Для управления с панели закомментировать следующие две строки.
-                controls['OPC_START_RTK'] = True
-                controls['OPC_pause_RTK'] = False
 
-                # Один флаг для запроса и подтверждения замены ГОТОВОЙ тары.
-                # True пишем один раз: иначе затрём сброс False, поступивший от ПЛК.
-                if not EMERGENCY_STOP.is_set():
-                    if not opcdb['OPC_ready_tray_full']:
-                        self.ready_full_sent = False
-                    elif not self.ready_full_sent:
-                        self._write('OPC_ready_tray_full', True, ua.VariantType.Boolean)
-                        self.ready_full_sent = True
-                    elif not READY_TRAY_REPLACED.is_set():
-                        ready_full = self.node('OPC_ready_tray_full').get_value()
-                        if not isinstance(ready_full, bool):
-                            raise ValueError('OPC_ready_tray_full: ожидался BOOL')
-                        if not ready_full:
-                            READY_TRAY_REPLACED.set()
                 self._write('OPC_log', opcdb['OPC_log'], ua.VariantType.String)
                 self._write('OPC_end_order', opcdb['OPC_end_order'], ua.VariantType.Boolean)
                 for name in ('OPC_cnt_newBoard', 'OPC_cnt_Board', 'OPC_success_count', 'OPC_nonsuccess_count'):
@@ -184,6 +200,21 @@ class OPCClient:
                 if controls['OPC_restart_RTK']:
                     trigger_emergency('Получен OPC_restart_RTK')
                 STOP_PROGRAM.wait(0.5)
+            except TrayStateError as exc:
+                ready_trays.connection_lost()
+
+                trigger_emergency(
+                    f"Ошибка состояния пневмокареток: {exc}"
+                )
+
+                self.connected.clear()
+                self.user_ready.clear()
+
+                logger4.exception(
+                    "Ошибка управления пневмокаретками"
+                )
+
+                break
             except Exception as exc:
                 if self.connected.is_set():
                     trigger_emergency(f'Ошибка OPC: {exc}')
@@ -194,6 +225,7 @@ class OPCClient:
                     self.client.disconnect()
                 except Exception:
                     pass
+                ready_trays.connection_lost()
                 STOP_PROGRAM.wait(5)
         try:
             self.client.disconnect()
@@ -279,14 +311,33 @@ def prepare_tables(modbus_provider):
 
 
 def wait_for_start():
+    waiting_logged = False
+
     while not EMERGENCY_STOP.is_set() and not STOP_PROGRAM.is_set():
+
         with shared_data_lock:
-            opcdb = shared_data['OPC-DB']
-            
-            enabled = opcdb['OPC_START_RTK'] and not opcdb['OPC_pause_RTK']
-        if enabled:
+            start = shared_data['OPC-DB']['OPC_START_RTK']
+            pause = shared_data['OPC-DB']['OPC_pause_RTK']
+            finish = shared_data['OPC-DB']['OPC_finish_order']
+
+        if finish:
+            return True  # Основной цикл обработает завершение заказа
+
+        if start and not pause:
+            if waiting_logged:
+                log_message("Перекладка возобновлена")
             return True
-        time.sleep(0.1)
+
+        if not waiting_logged:
+            log_message(
+                "Перекладка на паузе"
+                if pause else
+                "Ожидание команды START от Regul"
+            )
+            waiting_logged = True
+
+        STOP_PROGRAM.wait(0.1)
+
     return False
 
 
@@ -307,47 +358,141 @@ def wait_for_ready_tray():
 
 
 def transfer_board(modbus_provider):
-    global Cell, Cell1, Cell2
-    # Вместо setup/прошивки/ложементов — только забор и сразу укладка в готовую тару.
-    Cell = Cell1 + 1
-    log_message(f'Забор платы из новой тары, ячейка {Cell}')
-    if not modbus_provider._send_robot_command(211):
-        return False
-    Cell1 += 1
-    opc_set('OPC_cnt_newBoard', NEW_BOARD_CELL_LIMIT - Cell1)
+    global Cell, Cell1
 
-    if not wait_for_start():
+    slot = None
+    board_picked = False
+    pick_started = False
+
+    try:
+        # 1. Резервируем свободную ячейку готовой тары
+        slot = ready_trays.wait_and_reserve_slot(
+            EMERGENCY_STOP
+        )
+
+        if slot is None:
+            raise RuntimeError(
+                "Ожидание свободной каретки прервано"
+            )
+
+        logger4.info(
+            f"[KARETKA] Резерв: каретка {slot['cart']}, "
+            f"ячейка {slot['cell']}"
+        )
+        # После ожидания каретки повторно проверяем START и PAUSE
+        if not wait_for_start():
+            raise RuntimeError(
+                "Остановка во время ожидания разрешения START"
+            )
+
+        # 2. Забираем плату из исходной тары
+        Cell = Cell1 + 1
+
+        log_message(
+            f"Забор платы из исходной тары, ячейка {Cell}"
+        )
+
+        pick_started = True
+        if not modbus_provider._send_robot_command(211):
+            raise RuntimeError(
+                f"Ошибка забора платы из ячейки {Cell}"
+            )
+
+        board_picked = True
+
+        # 3. Указываем ячейку готовой каретки
+        Cell = slot['cell']
+
+        # Проверяем состояние каретки перед укладкой
+        ready_trays.check_before_placement(slot)
+
+        log_message(
+            f"Укладка платы: каретка {slot['cart']}, "
+            f"ячейка {Cell}"
+        )
+
+        # 4. Укладываем плату
+        if not modbus_provider._send_robot_command(241):
+            raise RuntimeError(
+                "Робот не подтвердил укладку 241"
+            )
+
+        # 5. Подтверждаем успешную укладку
+        ready_trays.confirm_placement(slot)
+        slot = None
+
+        Cell1 += 1
+
+        opc_set(
+            'OPC_cnt_newBoard',
+            NEW_BOARD_CELL_LIMIT - Cell1
+        )
+
+        opc_set('OPC_success_count', Cell1)
+
+        log_message(
+            f"Плата {Cell1} успешно переложена"
+        )
+
+        return True
+
+    except Exception as exc:
+        if slot is not None:
+            try:
+                if not pick_started:
+                    ready_trays.cancel_before_pick(slot)
+                else:
+                    ready_trays.placement_failed(
+                        slot,
+                        f"Ошибка перекладки: {exc}"
+                    )
+            except Exception:
+                logger4.exception(
+                    "Не удалось зафиксировать ошибку каретки"
+                )
+
+        trigger_emergency(
+            f"Ошибка перекладки, "
+            f"плата в захвате={board_picked}: {exc}"
+        )
+
         return False
-    Cell = Cell2 + 1
-    log_message(f'Укладка платы в готовую тару, ячейка {Cell}/4')
-    if not modbus_provider._send_robot_command(241):
-        return False
-    Cell2 += 1  # Учитываем только подтверждённую укладку.
-    opc_set('OPC_success_count', Cell1)
-    Cell = 0
-    # Tray не сбрасываем: готовая тара постоянная, меняются только ячейки.
-    modbus_provider.store.setValues(3, 8, [0])
-    return True
+
+    finally:
+        Cell = 0
+        modbus_provider.store.setValues(3, 8, [0])
 
 
 def robo_main_cycle(modbus_provider):
+
     while not EMERGENCY_STOP.is_set() and not STOP_PROGRAM.is_set():
-        if Cell2 >= READY_BOARD_CELL_LIMIT:
-            if not wait_for_ready_tray():
-                return
+
+        # Проверяем завершение заказа
         with shared_data_lock:
             finish = shared_data['OPC-DB']['OPC_finish_order']
+
         if Cell1 >= NEW_BOARD_CELL_LIMIT or finish:
             opc_set('OPC_end_order', False)
-            log_message(f'Перекладка завершена. Переложено плат: {Cell1}; в готовой таре: {Cell2}')
+
+            log_message(
+                f"Перекладка завершена. "
+                f"Успешно переложено плат: {Cell1}"
+            )
             return
+
+        # Ожидаем разрешение работы
         if not wait_for_start():
             return
-        # Завершение могло прийти, пока оператор держал цикл на паузе.
+
+        # Повторно проверяем завершение после ожидания
         with shared_data_lock:
             finish = shared_data['OPC-DB']['OPC_finish_order']
+
         if finish:
             continue
+
+        # transfer_board сама ожидает свободную каретку,
+        # резервирует ячейку и выполняет перекладку.
         if not transfer_board(modbus_provider):
             return
 
@@ -363,7 +508,6 @@ def main():
     logging.getLogger('opcua').setLevel(logging.WARNING)
     logger4.info('Программа перекладки запущена: исходная тара — %s ячеек, готовая — %s',
                  NEW_BOARD_CELL_LIMIT, READY_BOARD_CELL_LIMIT)
-    logger4.info('Активны заглушки: автоматический старт, пауза отключена')
     modbus_provider = ModbusProvider()
     opc_client = OPCClient(OPC_URL)
     logger4.info('Ожидание подключения OPC и имени оператора OPC_name: %s', OPC_URL)
@@ -390,8 +534,16 @@ def main():
             return
         robo_main_cycle(modbus_provider)
         # После завершения сохраняем OPC-витрину и счётчики до закрытия программы.
-        while not STOP_PROGRAM.wait(0.5):
-            pass
+        while not STOP_PROGRAM.is_set():
+
+            if EMERGENCY_STOP.is_set():
+                logger4.error(
+                    "Аварийная остановка. Завершение программы."
+                )
+                break
+
+            STOP_PROGRAM.wait(0.5)
+
     except KeyboardInterrupt:
         log_message('Программа остановлена оператором')
     except Exception as exc:
