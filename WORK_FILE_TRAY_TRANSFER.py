@@ -39,6 +39,11 @@ STOP_PROGRAM = threading.Event()
 shared_data_lock = threading.Lock()
 logger4 = logging.getLogger("LoggerTRAY_TRANSFER")
 
+NEW_TRAY_REQUEST = threading.Event()
+
+NEW_TRAY_REQUEST = threading.Event()
+RTK_STARTED = threading.Event()
+
 
 shared_data = {
     'OPC-DB': {
@@ -56,6 +61,7 @@ shared_data = {
         'OPC_firmware': '',
         'OPC_name': '',
         'OPC_log': 'Ожидание старта перекладки',
+        'OPC_do_next_tara': False,
     }
 }
 
@@ -87,6 +93,8 @@ class OPCClient:
         self.nodes = {}
         self.disabled_stubs = set()
         self.update_thread = threading.Thread(target=self.update_registers, daemon=True)
+        self.prev_next_tara = None
+        self.prev_start_rtk = None
 
         # ================= ПНЕВМОКАРЕТКИ =================
 
@@ -141,6 +149,7 @@ class OPCClient:
             logger4.warning('Заглушка %s.%s недоступна: %s', group, name, exc)
 
     def update_registers(self):
+        global Cell1
         while not STOP_PROGRAM.is_set():
             try:
                 if not self.connected.is_set():
@@ -162,12 +171,42 @@ class OPCClient:
                 if not isinstance(user, str):
                     raise ValueError('OPC_name: ожидался STRING')
                 controls['OPC_name'] = user.strip()
-                for name in ('OPC_start_RTK', 'OPC_pause_RTK', 'OPC_restart_RTK',
-                             'OPC_finish_order'):
+                for name in (
+                    'OPC_start_RTK',
+                    'OPC_pause_RTK',
+                    'OPC_restart_RTK',
+                    'OPC_finish_order',
+                    'OPC_do_next_tara',
+                ):
                     value = self.node(name).get_value()
-                    if not isinstance(value, bool):
+
+                    if type(value) is not bool:
                         raise ValueError(f'{name}: ожидался BOOL')
-                    controls['OPC_START_RTK' if name == 'OPC_start_RTK' else name] = value
+
+                    controls[
+                        'OPC_START_RTK' if name == 'OPC_start_RTK' else name
+                    ] = value
+                    
+                # фиксируем фронт START
+                start_rtk = controls['OPC_START_RTK']
+                if self.prev_start_rtk is not None:
+                    if start_rtk and not self.prev_start_rtk:
+                        RTK_STARTED.set()
+                        logger4.info("[RTK] Получен START. Работа разрешена")
+
+                self.prev_start_rtk = start_rtk
+
+                # Фронт установки новой исходной тары
+                next_tara = controls['OPC_do_next_tara']
+
+                if self.prev_next_tara is not None:
+                    if next_tara and not self.prev_next_tara:
+                        NEW_TRAY_REQUEST.set()
+                        logger4.info("[TARA] Получен сигнал новой исходной тары")
+
+                self.prev_next_tara = next_tara
+
+                #  ---------------
 
 
                 with shared_data_lock:
@@ -316,29 +355,42 @@ def wait_for_start():
     while not EMERGENCY_STOP.is_set() and not STOP_PROGRAM.is_set():
 
         with shared_data_lock:
-            start = shared_data['OPC-DB']['OPC_START_RTK']
             pause = shared_data['OPC-DB']['OPC_pause_RTK']
             finish = shared_data['OPC-DB']['OPC_finish_order']
 
         if finish:
-            return True  # Основной цикл обработает завершение заказа
+            return True
 
-        if start and not pause:
+        if RTK_STARTED.is_set() and not pause:
             if waiting_logged:
                 log_message("Перекладка возобновлена")
             return True
 
         if not waiting_logged:
-            log_message(
-                "Перекладка на паузе"
-                if pause else
-                "Ожидание команды START от Regul"
-            )
+            if not RTK_STARTED.is_set():
+                log_message("Ожидание первого START от Regul")
+            else:
+                log_message("Перекладка на паузе")
             waiting_logged = True
 
         STOP_PROGRAM.wait(0.1)
 
     return False
+
+def process_new_tray():
+    global Cell1
+
+    if not NEW_TRAY_REQUEST.is_set():
+        return False
+
+    Cell1 = 0
+    opc_set('OPC_cnt_newBoard', NEW_BOARD_CELL_LIMIT)
+    NEW_TRAY_REQUEST.clear()
+
+    logger4.info("[TARA] Новая исходная тара принята. Cell1 = 0")
+    log_message("Установлена новая исходная тара. Начинаем с ячейки 1")
+
+    return True
 
 
 def wait_for_ready_tray():
@@ -366,8 +418,17 @@ def transfer_board(modbus_provider):
 
     try:
         # 1. Резервируем свободную ячейку готовой тары
+        logger4.info(
+            "[KARETKA] Ожидание свободной каретки"
+        )
+
         slot = ready_trays.wait_and_reserve_slot(
             EMERGENCY_STOP
+        )
+
+        logger4.info(
+            "[KARETKA] Получен резерв: %s",
+            slot
         )
 
         if slot is None:
@@ -380,13 +441,21 @@ def transfer_board(modbus_provider):
             f"ячейка {slot['cell']}"
         )
         # После ожидания каретки повторно проверяем START и PAUSE
-        if not wait_for_start():
-            raise RuntimeError(
-                "Остановка во время ожидания разрешения START"
-            )
+        with shared_data_lock:
+            pause = shared_data['OPC-DB']['OPC_pause_RTK']
+
+        if pause or NEW_TRAY_REQUEST.is_set():
+            ready_trays.cancel_before_pick(slot)
+            slot = None
+            logger4.info("[RTK] Резерв отменён до забора платы")
+            return True
 
         # 2. Забираем плату из исходной тары
         Cell = Cell1 + 1
+        if Cell1 >= NEW_BOARD_CELL_LIMIT:
+            ready_trays.cancel_before_pick(slot)
+            slot = None
+            return True
 
         log_message(
             f"Забор платы из исходной тары, ячейка {Cell}"
@@ -467,32 +536,49 @@ def robo_main_cycle(modbus_provider):
 
     while not EMERGENCY_STOP.is_set() and not STOP_PROGRAM.is_set():
 
-        # Проверяем завершение заказа
+        # Новую тару принимаем только между операциями робота
+        process_new_tray()
+
         with shared_data_lock:
             finish = shared_data['OPC-DB']['OPC_finish_order']
 
-        if Cell1 >= NEW_BOARD_CELL_LIMIT or finish:
+        if finish:
             opc_set('OPC_end_order', False)
-
-            log_message(
-                f"Перекладка завершена. "
-                f"Успешно переложено плат: {Cell1}"
-            )
+            log_message("Перекладка завершена по команде Regul")
             return
 
-        # Ожидаем разрешение работы
+        # Исходная тара закончилась — ждём новую
+        if Cell1 >= NEW_BOARD_CELL_LIMIT:
+            log_message("Исходная тара закончилась. Ожидание замены")
+
+            while not EMERGENCY_STOP.is_set() and not STOP_PROGRAM.is_set():
+                if NEW_TRAY_REQUEST.is_set():
+                    process_new_tray()
+                    break
+
+                with shared_data_lock:
+                    finish = shared_data['OPC-DB']['OPC_finish_order']
+
+                if finish:
+                    break
+
+                STOP_PROGRAM.wait(0.1)
+
+            continue
+
         if not wait_for_start():
             return
 
-        # Повторно проверяем завершение после ожидания
+        # После ожидания START могла поступить новая тара
+        if NEW_TRAY_REQUEST.is_set():
+            continue
+
         with shared_data_lock:
             finish = shared_data['OPC-DB']['OPC_finish_order']
 
         if finish:
             continue
 
-        # transfer_board сама ожидает свободную каретку,
-        # резервирует ячейку и выполняет перекладку.
         if not transfer_board(modbus_provider):
             return
 
